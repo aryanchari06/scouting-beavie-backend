@@ -1,0 +1,14 @@
+{
+  "version": "2.0",
+  "rawPath": "/match-job-profile",
+  "requestContext": {
+    "http": {
+      "method": "POST"
+    }
+  },
+  "headers": {
+    "content-type": "application/json"
+  },
+  "isBase64Encoded": false,
+  "body": "{\"jobDescription\":\"We are seeking a software engineer with experience building reliable Node.js and TypeScript services. The role requires designing REST APIs, writing automated tests, collaborating with product teams, and deploying cloud applications. AWS experience and clear communication are preferred.\",\"resume\":\"Software engineer with five years of experience building Node.js and TypeScript backend services. Designed and maintained REST APIs, wrote unit and integration tests, and deployed serverless applications on AWS. Collaborated with product and design teams to deliver reliable features and improve application performance.\"}"
+}

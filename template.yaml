@@ -1,0 +1,104 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: scouting-beaver - job fit checker backend
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 512
+    LoggingConfig:
+      LogFormat: JSON
+Parameters:
+  ModelId:
+    Type: String
+    Description: Bedrock model ID or inference profile ID
+
+Resources:
+  HealthFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src        
+      Handler: handlers/health/app.handler
+      Runtime: nodejs24.x
+      Architectures:
+        - x86_64
+      # ReservedConcurrentExecutions: 5   # cost ceiling; new accounts may reject low values
+      FunctionUrlConfig:
+        AuthType: NONE
+        Cors:
+          AllowOrigins:
+            - '*'                  # replace with chrome-extension://<your-id> once you have it
+          AllowMethods:
+            - GET
+          AllowHeaders:
+            - content-type
+  ParsePDFFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src
+      Handler: handlers/parse-pdf/app.handler
+      Runtime: nodejs24.x
+      MemorySize: 1024
+      Timeout: 30
+      Architectures:
+        - x86_64
+      FunctionUrlConfig:
+        AuthType: NONE
+        Cors:
+          AllowOrigins:
+            - '*'
+          AllowMethods:
+            - POST
+          AllowHeaders:
+            - content-type
+            - x-install-id
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: dynamodb:UpdateItem
+              Resource:
+                - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/beavie-ratelimit
+                - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/beavie-installs
+  MatchJobProfileFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src
+      Handler: handlers/match-job-profile/app.handler
+      Runtime: nodejs24.x
+      MemorySize: 256
+      Timeout: 40
+      Architectures:
+        - x86_64
+      # ReservedConcurrentExecutions: 5
+      Environment:
+        Variables:
+          AGENT_MODEL_ID: !Ref ModelId
+      FunctionUrlConfig:
+        AuthType: NONE
+        Cors:
+          AllowOrigins:
+            - '*'
+          AllowMethods:
+            - POST
+          AllowHeaders:
+            - content-type
+            - x-install-id
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: bedrock:InvokeModel
+              Resource: '*'
+            - Effect: Allow
+              Action: dynamodb:UpdateItem
+              Resource: !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/beavie-ratelimit
+            - Effect: Allow
+              Action: dynamodb:GetItem
+              Resource: !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/beavie-installs
+
+Outputs:
+  HealthUrl:
+    Value: !GetAtt HealthFunctionUrl.FunctionUrl
+  ParsePdfUrl:
+    Value: !GetAtt ParsePDFFunctionUrl.FunctionUrl
+  MatchJobProfileUrl:
+    Value: !GetAtt MatchJobProfileFunctionUrl.FunctionUrl
