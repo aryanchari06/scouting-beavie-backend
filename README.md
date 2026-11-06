@@ -1,129 +1,310 @@
-# scouting-beaver
+# Scouting Beavie: Backend Documentation
 
-This project contains source code and supporting files for a serverless application that you can deploy with the SAM CLI. It includes the following files and folders.
+Serverless backend for the Scouting Beavie Chrome extension. It parses resume PDFs, scores resume-to-job fit with an LLM, and enforces per-day usage limits without any user accounts.
 
-- hello-world - Code for the application's Lambda function.
-- events - Invocation events that you can use to invoke the function.
-- hello-world/tests - Unit tests for the application code. 
-- template.yaml - A template that defines the application's AWS resources.
+> **Status:** Deployed and verified end to end (IAM, rate limiting, TTL, budget alerts). Items marked `TODO` need to be filled in from source I haven't documented yet.
 
-The application uses several AWS resources, including Lambda functions and an API Gateway API. These resources are defined in the `template.yaml` file in this project. You can update the template to add AWS resources through the same deployment process that updates your application code.
+---
 
-If you prefer to use an integrated development environment (IDE) to build and test your application, you can use the AWS Toolkit.  
-The AWS Toolkit is an open source plug-in for popular IDEs that uses the SAM CLI to build and deploy serverless applications on AWS. The AWS Toolkit also adds a simplified step-through debugging experience for Lambda function code. See the following links to get started.
+## 1. Architecture
 
-* [CLion](https://docs.aws.amazon.com/toolkit-for-jetbrains/latest/userguide/welcome.html)
-* [GoLand](https://docs.aws.amazon.com/toolkit-for-jetbrains/latest/userguide/welcome.html)
-* [IntelliJ](https://docs.aws.amazon.com/toolkit-for-jetbrains/latest/userguide/welcome.html)
-* [WebStorm](https://docs.aws.amazon.com/toolkit-for-jetbrains/latest/userguide/welcome.html)
-* [Rider](https://docs.aws.amazon.com/toolkit-for-jetbrains/latest/userguide/welcome.html)
-* [PhpStorm](https://docs.aws.amazon.com/toolkit-for-jetbrains/latest/userguide/welcome.html)
-* [PyCharm](https://docs.aws.amazon.com/toolkit-for-jetbrains/latest/userguide/welcome.html)
-* [RubyMine](https://docs.aws.amazon.com/toolkit-for-jetbrains/latest/userguide/welcome.html)
-* [DataGrip](https://docs.aws.amazon.com/toolkit-for-jetbrains/latest/userguide/welcome.html)
-* [VS Code](https://docs.aws.amazon.com/toolkit-for-vscode/latest/userguide/welcome.html)
-* [Visual Studio](https://docs.aws.amazon.com/toolkit-for-visual-studio/latest/user-guide/welcome.html)
+```
+Chrome extension
+      |  HTTPS + x-install-id header
+      v
+Lambda Function URLs (AuthType NONE)
+      |-- HealthFunction          GET  /
+      |-- ParsePDFFunction        POST /parse-pdf
+      |-- MatchJobProfileFunction POST /match-job-profile
+      |
+      +--> DynamoDB: beavie-ratelimit   (daily counters, TTL)
+      +--> DynamoDB: beavie-installs    (registered install IDs)
+      +--> Amazon Bedrock               (match-job-profile only)
+```
 
-## Deploy the sample application
+| Item | Value |
+|---|---|
+| Framework | AWS SAM (CloudFormation) |
+| Stack name | `scouting-beaver` |
+| Runtime | Node.js 24.x, x86_64 |
+| Region | `ap-south-1` |
+| Auth | None. Anonymous install ID plus IP-based limits |
+| Always-on servers | None. Pay per request |
 
-The Serverless Application Model Command Line Interface (SAM CLI) is an extension of the AWS CLI that adds functionality for building and testing Lambda applications. It uses Docker to run your functions in an Amazon Linux environment that matches Lambda. It can also emulate your application's build environment and API.
+---
 
-To use the SAM CLI, you need the following tools.
+## 2. Functions
 
-* SAM CLI - [Install the SAM CLI](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/serverless-sam-cli-install.html)
-* Node.js - [Install Node.js 24](https://nodejs.org/en/), including the NPM package management tool.
-* Docker - [Install Docker community edition](https://hub.docker.com/search/?type=edition&offering=community)
+| Function | Handler | Memory | Timeout | Purpose |
+|---|---|---|---|---|
+| `HealthFunction` | `handlers/health/app.handler` | 512 MB | 30 s | Health check |
+| `ParsePDFFunction` | `handlers/parse-pdf/app.handler` | 1024 MB | 30 s | Extract text from a resume PDF |
+| `MatchJobProfileFunction` | `handlers/match-job-profile/app.handler` | 256 MB | 40 s | Score resume against a job using Bedrock |
 
-To build and deploy your application for the first time, run the following in your shell:
+All three use `CodeUri: src` and JSON logging.
+
+### Environment variables
+
+| Function | Variable | Description |
+|---|---|---|
+| `MatchJobProfileFunction` | `AGENT_MODEL_ID` | Bedrock model ID or inference profile ID, set from the `ModelId` template parameter |
+
+---
+
+## 3. API reference
+
+All protected endpoints require the header `x-install-id` (non-empty string, max 128 characters).
+
+### 3.1 `POST /parse-pdf`
+
+Request: raw PDF bytes as the body (Function URL delivers it base64-encoded).
+
+Processing order:
+
+1. Method must be `POST` (else 405) and path must be `/parse-pdf` (else 404).
+2. Body must exist and be base64-encoded (else 400).
+3. Encoded length must be under the limit (else 413).
+4. Decoded bytes must start with `%PDF` (else 415).
+5. **Rate limit check** (else 429, or 400/500 for bad ID or backend failure).
+6. Load PDF and reject more than 2 pages (422).
+7. Extract text with `unpdf`. Reject empty text (422) or text over 100,000 characters (422).
+8. Register the install ID in `beavie-installs` (500 on failure).
+9. Return `200 { "data": { "text": "..." } }`.
+
+Limits:
+
+| Rule | Value |
+|---|---|
+| Max file size | 5 MB |
+| Max pages | 2 |
+| Max extracted text | 100,000 characters |
+
+Response codes:
+
+| Status | Meaning |
+|---|---|
+| 200 | Text extracted |
+| 400 | Missing body or invalid install ID |
+| 405 | Wrong method |
+| 404 | Wrong path |
+| 413 | File too large |
+| 415 | Not a PDF |
+| 422 | Too many pages, no readable text, text too large, or unreadable PDF |
+| 429 | Daily quota exceeded |
+| 500 | Rate limiter or install registry failure |
+
+The install ID is registered only after a successful parse, so failed uploads don't create registry rows.
+
+### 3.2 `POST /match-job-profile`
+
+Scores a resume against a job using Bedrock.
+
+- Requires a registered install ID (registered by a successful `/parse-pdf`). Unknown IDs are rejected. `TODO`: confirm status code and message in source.
+- Request body: `TODO`
+- Success response: `TODO`
+- Prompt and output schema: `TODO`
+
+### 3.3 `GET /` (health)
+
+`TODO`: document the response shape.
+
+---
+
+## 4. Rate limiting
+
+Implemented in `utils/rate-limit.js` as `withRateLimit(event)`. It returns `null` when the request is allowed, or a failure object `{ statusCode, code, message, retryable }`.
+
+### Limits per UTC day
+
+| Endpoint | Per install ID | Per IP |
+|---|---|---|
+| `/parse-pdf` | 10 | 50 |
+| `/match-job-profile` | 3 | 10 |
+
+### How it works
+
+Each request atomically increments two counters in `beavie-ratelimit` with a single `TransactWriteCommand`:
+
+- IP counter
+- Install ID counter
+
+Each item uses:
+
+```
+UpdateExpression:    SET #count = if_not_exists(#count, :zero) + :one, #exp = :exp
+ConditionExpression: attribute_not_exists(#count) OR #count < :limit
+```
+
+If either condition fails, the whole transaction is cancelled. This means a request blocked by one limit does not consume the other's quota.
+
+Key format:
+
+```
+scope:<ip|installId>::value:<value>::endpoint:<parse_pdf|match_job_profile>#<YYYY-MM-DD>
+```
+
+Because the date is part of the key, each day starts with fresh counters.
+
+### Failure codes
+
+| Code | HTTP | Cause |
+|---|---|---|
+| `NOT_FOUND` | 404 | Path not in allowed list |
+| `CLIENT_IP_UNAVAILABLE` | 500 | No source IP on the request |
+| `INSTALL_ID_INVALID` | 400 | Missing, blank, or longer than 128 characters |
+| `RATE_LIMIT_EXCEEDED` | 429 | A counter hit its limit |
+| `RATE_LIMIT_ERROR` | 500 (retryable) | Unexpected error, such as a DynamoDB or IAM problem |
+
+The limiter fails closed: if DynamoDB is unavailable, requests are blocked rather than allowed through.
+
+### Changing limits
+
+Edit `getMaxLimit(path, scope)` in `utils/rate-limit.js`. To add an endpoint, add it to `allowedPaths` as well.
+
+---
+
+## 5. Data stores
+
+### `beavie-ratelimit`
+
+| Attribute | Type | Notes |
+|---|---|---|
+| `pk` | String (partition key) | Key format in section 4 |
+| `count` | Number | Requests so far today |
+| `expiresAt` | Number | Epoch seconds, now plus 2 days |
+
+**TTL is enabled on `expiresAt`.** DynamoDB deletes expired rows on its own, usually within about 48 hours of expiry. Rows created before TTL was added have no `expiresAt` and won't expire. They are tiny and can be deleted by hand.
+
+### `beavie-installs`
+
+| Attribute | Type | Notes |
+|---|---|---|
+| `pk` | String (partition key) | Install ID |
+| `createdAt` | String | ISO timestamp, set once |
+| `lastSeenAt` | String | ISO timestamp, updated on each successful parse |
+
+TTL is **not** enabled on this table, since it is the registry of valid installs.
+
+---
+
+## 6. Security and IAM
+
+Least-privilege policies per function (in `template.yaml`):
+
+| Function | Permissions |
+|---|---|
+| `ParsePDFFunction` | `dynamodb:UpdateItem` on `beavie-ratelimit` and `beavie-installs` |
+| `MatchJobProfileFunction` | `dynamodb:UpdateItem` on `beavie-ratelimit`, `dynamodb:GetItem` on `beavie-installs`, `bedrock:InvokeModel` on `*` |
+
+Important: `dynamodb:TransactWriteItems` is **not** an IAM action. DynamoDB authorizes each `Update` inside a transaction as `dynamodb:UpdateItem`, so that is the permission to grant. Putting `TransactWriteItems` in a policy grants nothing and causes `AccessDeniedException` at runtime.
+
+Current exposure:
+
+- **Function URLs are public** (`AuthType: NONE`). Abuse protection comes from the rate limits, not from authentication.
+- **CORS allows any origin (`*`).** Lock this to `chrome-extension://<extension-id>` once the Web Store assigns the ID.
+- **`bedrock:InvokeModel` uses `Resource: '*'`.** Scope it to the model or inference profile ARN.
+
+---
+
+## 7. Cost controls
+
+| Control | Status |
+|---|---|
+| Per-IP and per-install daily limits | Active |
+| AWS Budget, $5 per month, email alerts at 80% actual and 100% forecasted | Active (created in console) |
+| Lambda reserved concurrency | Not set. The account's concurrency quota is too low for it. Request a quota increase, then add it back |
+| Global daily cap on total requests | Not implemented. Optional DynamoDB counter, or API Gateway usage plan |
+| CloudWatch alarm on `MatchJobProfileFunction` invocations | `TODO` (recommended) |
+
+Notes:
+
+- Budgets alert by email only. They do not stop spending, and billing data lags by hours.
+- The account-wide Lambda concurrency limit still bounds total simultaneous executions.
+
+---
+
+## 8. Deployment
+
+Prerequisites: AWS CLI configured, AWS SAM CLI, Node.js.
 
 ```bash
+cd scouting-beaver-backend
 sam build
+sam deploy
+```
+
+First deploy needs a guided run to save settings:
+
+```bash
 sam deploy --guided
 ```
 
-The first command will build the source of your application. The second command will package and deploy your application to AWS, with a series of prompts:
+You will be asked for the `ModelId` parameter (Bedrock model ID or inference profile ID).
 
-* **Stack Name**: The name of the stack to deploy to CloudFormation. This should be unique to your account and region, and a good starting point would be something matching your project name.
-* **AWS Region**: The AWS region you want to deploy your app to.
-* **Confirm changes before deploy**: If set to yes, any change sets will be shown to you before execution for manual review. If set to no, the AWS SAM CLI will automatically deploy application changes.
-* **Allow SAM CLI IAM role creation**: Many AWS SAM templates, including this example, create AWS IAM roles required for the AWS Lambda function(s) included to access AWS services. By default, these are scoped down to minimum required permissions. To deploy an AWS CloudFormation stack which creates or modifies IAM roles, the `CAPABILITY_IAM` value for `capabilities` must be provided. If permission isn't provided through this prompt, to deploy this example you must explicitly pass `--capabilities CAPABILITY_IAM` to the `sam deploy` command.
-* **Save arguments to samconfig.toml**: If set to yes, your choices will be saved to a configuration file inside the project, so that in the future you can just re-run `sam deploy` without parameters to deploy changes to your application.
+Stack outputs after deploy:
 
-You can find your API Gateway Endpoint URL in the output values displayed after deployment.
+- `HealthUrl`
+- `ParsePdfUrl`
+- `MatchJobProfileUrl`
 
-## Use the SAM CLI to build and test locally
+Copy the last two into the extension's config.
 
-Build your application with the `sam build` command.
+One-time setup (already done):
 
 ```bash
-scouting-beaver$ sam build
+aws dynamodb update-time-to-live \
+  --table-name beavie-ratelimit \
+  --time-to-live-specification "Enabled=true,AttributeName=expiresAt" \
+  --region ap-south-1
 ```
 
-The SAM CLI installs dependencies defined in `hello-world/package.json`, creates a deployment package, and saves it in the `.aws-sam/build` folder.
+### Rollbacks
 
-Test a single function by invoking it directly with a test event. An event is a JSON document that represents the input that the function receives from the event source. Test events are included in the `events` folder in this project.
+A failed deploy rolls back automatically. If a stack ends in `UPDATE_ROLLBACK_COMPLETE`, it is back in its previous working state. Fix the cause and deploy again. Past example: setting `ReservedConcurrentExecutions` failed because AWS requires at least 10 unreserved concurrent executions in the account.
 
-Run functions locally and invoke them with the `sam local invoke` command.
+---
 
-```bash
-scouting-beaver$ sam local invoke HelloWorldFunction --event events/event.json
+## 9. Monitoring and troubleshooting
+
+Logs go to CloudWatch Logs in JSON format, one log group per function.
+
+| Symptom | Likely cause |
+|---|---|
+| `AccessDeniedException ... dynamodb:UpdateItem` | IAM policy missing `dynamodb:UpdateItem` on the table |
+| 500 `RATE_LIMIT_ERROR` | DynamoDB or IAM problem. Check the `Rate limit error:` log line |
+| 500 "Could not register this installation" | Missing `UpdateItem` permission on `beavie-installs` |
+| 429 for a new user | Shared IP (office, college, mobile carrier) hit the per-IP limit |
+| 413 on a normal PDF | Size limit constant is wrong. See known issues |
+| 422 "No readable text found" | Scanned or image-only PDF (no OCR) |
+
+---
+
+## 10. Known issues and follow-ups
+
+1. **Size limit constant.** `MAX_ENCODED_LENGTH = Math.ceil(MAX_PDF_BYTES * 4) / 3` divides outside `Math.ceil`. The intended form is `Math.ceil(MAX_PDF_BYTES / 3) * 4`. Verify it in source.
+2. **Quota is consumed before page and text checks.** A rejected PDF (3 pages, no text) still counts toward the install's 10 per day.
+3. **Redundant install ID check** in the `/parse-pdf` handler. The rate limiter already rejects missing or invalid IDs.
+4. **Per-install quota resets on reinstall**, and fake install IDs are possible. Per-IP limits and the budget bound the worst case.
+5. **Planned:** lock CORS to the extension ID, scope the Bedrock ARN, add reserved concurrency after a quota increase, add a CloudWatch alarm on invocations, and optionally add a global daily cap.
+
+---
+
+## 11. Project layout
+
+`TODO`: confirm against the actual repo.
+
 ```
-
-The SAM CLI can also emulate your application's API. Use the `sam local start-api` to run the API locally on port 3000.
-
-```bash
-scouting-beaver$ sam local start-api
-scouting-beaver$ curl http://localhost:3000/
+scouting-beaver-backend/
+├── template.yaml
+├── samconfig.toml
+└── src/
+    ├── handlers/
+    │   ├── health/app.mjs
+    │   ├── parse-pdf/app.mjs
+    │   └── match-job-profile/app.mjs
+    └── utils/
+        ├── http-response.mjs
+        ├── rate-limit.js
+        ├── install-registry.js
+        └── dynamo-db.js
 ```
-
-The SAM CLI reads the application template to determine the API's routes and the functions that they invoke. The `Events` property on each function's definition includes the route and method for each path.
-
-```yaml
-      Events:
-        HelloWorld:
-          Type: Api
-          Properties:
-            Path: /hello
-            Method: get
-```
-
-## Add a resource to your application
-The application template uses AWS Serverless Application Model (AWS SAM) to define application resources. AWS SAM is an extension of AWS CloudFormation with a simpler syntax for configuring common serverless application resources such as functions, triggers, and APIs. For resources not included in [the SAM specification](https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md), you can use standard [AWS CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-template-resource-type-ref.html) resource types.
-
-## Fetch, tail, and filter Lambda function logs
-
-To simplify troubleshooting, SAM CLI has a command called `sam logs`. `sam logs` lets you fetch logs generated by your deployed Lambda function from the command line. In addition to printing the logs on the terminal, this command has several nifty features to help you quickly find the bug.
-
-`NOTE`: This command works for all AWS Lambda functions; not just the ones you deploy using SAM.
-
-```bash
-scouting-beaver$ sam logs -n HelloWorldFunction --stack-name scouting-beaver --tail
-```
-
-You can find more information and examples about filtering Lambda function logs in the [SAM CLI Documentation](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/serverless-sam-cli-logging.html).
-
-## Unit tests
-
-Tests are defined in the `hello-world/tests` folder in this project. Use NPM to install the [Mocha test framework](https://mochajs.org/) and run unit tests.
-
-```bash
-scouting-beaver$ cd hello-world
-hello-world$ npm install
-hello-world$ npm run test
-```
-
-## Cleanup
-
-To delete the sample application that you created, use the AWS CLI. Assuming you used your project name for the stack name, you can run the following:
-
-```bash
-sam delete --stack-name scouting-beaver
-```
-
-## Resources
-
-See the [AWS SAM developer guide](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/what-is-sam.html) for an introduction to SAM specification, the SAM CLI, and serverless application concepts.
-
-Next, you can use AWS Serverless Application Repository to deploy ready to use Apps that go beyond hello world samples and learn how authors developed their applications: [AWS Serverless Application Repository main page](https://aws.amazon.com/serverless/serverlessrepo/)
-#   s c o u t i n g - b e a v i e - b a c k e n d  
- 
