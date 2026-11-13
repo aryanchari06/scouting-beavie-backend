@@ -18,7 +18,7 @@ capabilities = "CAPABILITY_IAM"
 confirm_changeset = true
 resolve_s3 = true
 s3_prefix = "scouting-beaver"
-parameter_overrides = "ModelId=\"apac.amazon.nova-pro-v1:0\""
+parameter_overrides = "ModelId=\"apac.amazon.nova-pro-v1:0\" AllowedOrigins=\"chrome-extension://glgpeikpgmeikdgojhhbmbigjkbohoof\""
 image_repositories = []
 
 [default.package.parameters]

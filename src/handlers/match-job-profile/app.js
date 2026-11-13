@@ -5,7 +5,7 @@ import { BedrockRuntimeClient, ConverseCommand } from "@aws-sdk/client-bedrock-r
 
 const MAX_JD_LENGTH = 8000
 const MAX_RESUME_LENGTH = 50000
-const MIN_TEXT_LENGTH = 100      
+const MIN_TEXT_LENGTH = 100
 const MAX_ITEMS = 6              // max entries in matches and misses
 const MAX_DETAIL_LENGTH = 300    // max characters per detail sentence
 
@@ -188,7 +188,10 @@ const analyze = async (resume, jobDescription) => {
 export const handler = async (event) => {
     const method = event.requestContext.http.method
     const path = event.rawPath
+    // const allowed = process.env.ALLOWED_ORIGINS.split(',')
+    // const origin = event.headers?.origin
 
+    // if (!allowed.includes(origin)) return errorResponse(403, 'BAD_ORIGIN', 'Bad origin')
     if (method !== 'POST') return errorResponse(405, 'METHOD_NOT_ALLOWED', 'Method not allowed')
     if (path !== '/match-job-profile') return errorResponse(404, 'NOT_FOUND', 'Not found')
 

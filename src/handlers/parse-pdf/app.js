@@ -5,13 +5,18 @@ import { Buffer } from "node:buffer"
 import { extractText, getDocumentProxy } from "unpdf"
 
 const MAX_PDF_BYTES = 5 * 1024 * 1024
-const MAX_ENCODED_LENGTH = Math.ceil(MAX_PDF_BYTES * 4) / 3
+const MAX_ENCODED_LENGTH = Math.ceil(MAX_PDF_BYTES / 3) * 4
 const MAX_PDF_PAGES = 2
 const MAX_EXTRACTED_TEXT_SIZE = 100000
 
 export const handler = async (event) => {
     const method = event.requestContext.http.method;
     const path = event.rawPath
+    // const allowed = process.env.ALLOWED_ORIGINS.split(',')
+    // const origin = event.headers?.origin
+
+    // if (!allowed.includes(origin)) 
+    //     return HttpResponse({ statusCode: 403, body: { message: 'Bad origin' } });
 
     if (method !== 'POST')
         return HttpResponse({ statusCode: 405, body: { message: 'Method not allowed' } });

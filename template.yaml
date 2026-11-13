@@ -12,6 +12,9 @@ Parameters:
   ModelId:
     Type: String
     Description: Bedrock model ID or inference profile ID
+  AllowedOrigins:
+    Type: String
+    Default: chrome-extension://glgpeikpgmeikdgojhhbmbigjkbohoof
 
 Resources:
   HealthFunction:
@@ -42,6 +45,9 @@ Resources:
       Timeout: 30
       Architectures:
         - x86_64
+      Environment:
+        Variables:
+          ALLOWED_ORIGINS: !Ref AllowedOrigins
       FunctionUrlConfig:
         AuthType: NONE
         Cors:
@@ -73,6 +79,7 @@ Resources:
       Environment:
         Variables:
           AGENT_MODEL_ID: !Ref ModelId
+          ALLOWED_ORIGINS: !Ref AllowedOrigins
       FunctionUrlConfig:
         AuthType: NONE
         Cors:
@@ -87,7 +94,9 @@ Resources:
         - Statement:
             - Effect: Allow
               Action: bedrock:InvokeModel
-              Resource: '*'
+              Resource:
+                - !Sub arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${ModelId}
+                - arn:aws:bedrock:*::foundation-model/amazon.nova-pro-v1:0
             - Effect: Allow
               Action: dynamodb:UpdateItem
               Resource: !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/beavie-ratelimit
